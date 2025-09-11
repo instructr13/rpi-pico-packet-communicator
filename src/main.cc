@@ -225,6 +225,7 @@ private:
 namespace packets {
 
 // COBS max chunk size
+constexpr size_t MAX_CHUNK_ESTIMATE_SIZE = 64;
 constexpr size_t MAX_CHUNK_SIZE =
     44; // 64 - 5 (cobs) - 14 (header+crc) - 1 (delimiter)
 constexpr size_t MAX_FRAME_SIZE = 2048;
@@ -287,9 +288,10 @@ public:
   }
 
   void update() {
-    if (!is_available() && prev_availability) {
+    if (!is_available()) {
       if (prev_availability) {
         rx_buffer.clear();
+        tx_buffer.clear();
 
         prev_availability = false;
 
@@ -317,6 +319,10 @@ public:
 private:
   std::vector<Frame> frame_table{};
   std::vector<uint8_t> rx_buffer;
+  std::vector<uint8_t> tx_buffer;
+
+  std::array<uint8_t, MAX_CHUNK_ESTIMATE_SIZE> decoded_buffer{};
+  std::array<uint8_t, MAX_CHUNK_ESTIMATE_SIZE> cobs_buffer{};
 
   bool prev_availability = false;
   size_t next_frame_id = 0;
@@ -327,7 +333,7 @@ private:
 
   virtual void recv_raw_data(std::vector<uint8_t> &data) = 0;
 
-  virtual void send_raw_data(const uint8_t *data, size_t len) = 0;
+  virtual size_t send_raw_data(const uint8_t *data, size_t len) = 0;
 
   virtual void on_recv(Packet packet) = 0;
 
@@ -443,11 +449,9 @@ private:
   }
 
   void process_rx_buffer() {
-    size_t idx;
-
     while (true) {
-      idx = std::find(rx_buffer.begin(), rx_buffer.end(), 0x00) -
-            rx_buffer.begin();
+      const size_t idx = std::find(rx_buffer.begin(), rx_buffer.end(), 0x00) -
+                         rx_buffer.begin();
 
       if (idx == rx_buffer.size()) {
         // No complete chunk yet
@@ -455,12 +459,11 @@ private:
       }
 
       if (idx > 0) {
-        std::array<uint8_t, 4096> decoded{};
         size_t decoded_length = 0;
 
-        if (cobs::decode(rx_buffer.data(), idx, decoded.data(),
+        if (cobs::decode(rx_buffer.data(), idx, decoded_buffer.data(),
                          decoded_length)) {
-          if (auto packet = recv(decoded.data(), decoded_length)) {
+          if (auto packet = recv(decoded_buffer.data(), decoded_length)) {
             on_recv(std::move(packet.value()));
           }
         } else {
@@ -470,6 +473,20 @@ private:
 
       // Remove processed chunk and delimiter
       rx_buffer.erase(rx_buffer.begin(), rx_buffer.begin() + idx + 1);
+    }
+  }
+
+  void queue_send_raw_data(const uint8_t *data, const size_t len) {
+    tx_buffer.insert(tx_buffer.end(), data, data + len);
+
+    flush_tx_buffer();
+  }
+
+  void flush_tx_buffer() {
+    const auto written = send_raw_data(tx_buffer.data(), tx_buffer.size());
+
+    if (written > 0) {
+      tx_buffer.erase(tx_buffer.begin(), tx_buffer.begin() + written);
     }
   }
 
@@ -529,15 +546,13 @@ private:
 
     encoder.push_number(crc);
 
-    std::array<uint8_t, 4096> cobs_buffer{};
-
     const auto cobs_len =
         cobs::encode(buffer.data(), buffer.size(), cobs_buffer.data());
 
     cobs_buffer[cobs_len] = 0;
 
     // write encoded then 0x00 as delimiter
-    send_raw_data(cobs_buffer.data(), cobs_len + 1);
+    queue_send_raw_data(cobs_buffer.data(), cobs_len + 1);
   }
 
   void send_frame(const uint16_t type, const uint32_t frame_id,
@@ -567,34 +582,46 @@ public:
 
 private:
   void recv_raw_data(std::vector<uint8_t> &data) override {
+    tud_task();
     uint32_t avail;
 
     while ((avail = tud_cdc_available()) > 0) {
-      data.resize(data.size() + avail);
+      const size_t old = data.size();
 
-      const size_t offset = data.size() - avail;
+      data.resize(old + avail);
 
-      tud_task();
+      const size_t offset = data.size();
+
       tud_cdc_read(data.data() + offset, avail);
+      tud_task();
     }
   }
 
-  void send_raw_data(const uint8_t *data, const size_t len) override {
-    uint32_t written = 0;
+  size_t send_raw_data(const uint8_t *data, const size_t len) override {
+    tud_task();
+    size_t written = 0;
 
     while (written < len) {
+      const auto write_ptr = data + written;
+      const auto write_len = len - written;
+
       uint32_t avail = tud_cdc_write_available();
 
-      if (avail > 0) {
-        const uint32_t to_write =
-            std::min(avail, len - written);
+      if (avail == 0)
+        break;
 
-        tud_task();
-        written += tud_cdc_write(data + written, to_write);
+      const uint32_t to_write = std::min<uint32_t>(avail, write_len);
+      const uint32_t current_written = tud_cdc_write(write_ptr, to_write);
 
-        tud_cdc_write_flush();
-      }
+      if (current_written == 0)
+        break;
+
+      tud_cdc_write_flush();
+
+      written += current_written;
     }
+
+    return written;
   }
 };
 
