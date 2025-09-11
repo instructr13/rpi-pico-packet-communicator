@@ -2,50 +2,196 @@
 #include <tusb.h>
 
 #include <algorithm>
-#include <array>
+#include <cstring>
 #include <functional>
 #include <optional>
 #include <string>
+
+// Fixed-size ringbuf
+template <typename T, size_t N> class ringbuf {
+  static_assert(N > 0 && (N & (N - 1)) == 0,
+                "N must be a power of two and greater than 0");
+
+public:
+  [[nodiscard]] size_t size() const { return write_idx - read_idx; }
+
+  [[nodiscard]] size_t capacity() const { return N; }
+
+  [[nodiscard]] bool empty() const { return write_idx == read_idx; }
+
+  bool push(const T &item) {
+    if (write_idx - read_idx == N) {
+      // Full
+      return false;
+    }
+
+    buffer[write_idx & (N - 1)] = item;
+
+    ++write_idx;
+
+    return true;
+  }
+
+  std::optional<T> pop() {
+    if (write_idx == read_idx) {
+      // Empty
+      return std::nullopt;
+    }
+
+    const auto item = buffer[read_idx & (N - 1)];
+
+    ++read_idx;
+
+    return item;
+  }
+
+  // Indexing
+
+  [[nodiscard]] std::optional<T> at(const size_t index) const {
+    if (index >= size()) {
+      return std::nullopt;
+    }
+
+    return buffer[(read_idx + index) & (N - 1)];
+  }
+
+  T &operator[](const size_t index) {
+    assert(index < size());
+
+    return buffer[(read_idx + index) & (N - 1)];
+  }
+
+  // Batch operations
+
+  size_t push(const T *items, const size_t len) {
+    const size_t space = N - size();
+
+    const size_t to_write = std::min(len, space);
+
+    if (to_write == 0) {
+      return 0;
+    }
+
+    const size_t first_chunk = std::min(to_write, N - (write_idx & (N - 1)));
+
+    std::memcpy(&buffer[write_idx & (N - 1)], items, first_chunk * sizeof(T));
+
+    if (first_chunk < to_write) {
+      // Wrap around
+      std::memcpy(buffer.data(), items + first_chunk,
+                  (to_write - first_chunk) * sizeof(T));
+    }
+
+    write_idx += to_write;
+
+    return to_write;
+  }
+
+  size_t pop(T *items, const size_t len) {
+    const size_t to_read = std::min(len, size());
+
+    if (to_read == 0) {
+      return 0;
+    }
+
+    const size_t first_chunk = std::min(to_read, N - (read_idx & (N - 1)));
+
+    std::memcpy(items, &buffer[read_idx & (N - 1)], first_chunk * sizeof(T));
+
+    if (first_chunk < to_read) {
+      // Wrap around
+      std::memcpy(items + first_chunk, buffer.data(),
+                  (to_read - first_chunk) * sizeof(T));
+    }
+
+    read_idx += to_read;
+
+    return to_read;
+  }
+
+  void clear() { read_idx = write_idx = 0; }
+
+  void erase_front(const size_t len) {
+    const size_t to_erase = std::min(len, size());
+
+    read_idx += to_erase;
+  }
+
+  [[nodiscard]] size_t find(const T &item) const {
+    for (size_t i = 0; i < size(); ++i) {
+      if (buffer[(read_idx + i) & (N - 1)] == item) {
+        return i;
+      }
+    }
+
+    return size(); // Not found
+  }
+
+private:
+  std::array<T, N> buffer{};
+  size_t read_idx = 0;
+  size_t write_idx = 0;
+};
 
 // CRC16-CCITT Implementation
 namespace crc16_ccitt {
 
 constexpr uint16_t POLYNOMIAL = 0x1021;
 
-std::array<uint16_t, 256> table{};
+std::array<std::array<uint16_t, 256>, 8> table;
 bool table_initialized = false;
 
-void initialize_table() {
-  for (uint16_t i = 0; i < 256; ++i) {
-    auto crc = i;
+uint16_t basic_crc16(uint16_t crc, const uint8_t *data, const size_t length) {
+  for (size_t i = 0; i < length; ++i) {
+    crc ^= static_cast<uint16_t>(data[i]) << 8;
 
     for (uint8_t j = 0; j < 8; ++j) {
-      if (crc & 0x0001) {
-        crc = (crc >> 1) ^ POLYNOMIAL;
+      if (crc & 0x8000) {
+        crc = (crc << 1) ^ POLYNOMIAL;
       } else {
-        crc >>= 1;
+        crc <<= 1;
       }
     }
+  }
 
-    table[i] = crc;
+  return crc;
+}
+
+void initialize_table() {
+  for (size_t i = 0; i < 256; ++i) {
+    const auto byte = static_cast<uint8_t>(i);
+
+    table[0][i] = basic_crc16(0, &byte, 1);
+  }
+
+  for (size_t t = 1; t < 8; ++t) {
+    for (size_t i = 0; i < 256; ++i) {
+      table[t][i] = (table[t - 1][i] >> 8) ^ table[0][table[t - 1][i] & 0xFF];
+    }
   }
 
   table_initialized = true;
 }
 
-uint16_t compute(const uint8_t *data, const size_t length,
-                 const uint16_t initial_crc = 0xFFFF) {
+uint16_t compute(const uint8_t *data, size_t length,
+                 const uint16_t initial_crc = 0) {
   if (!table_initialized) {
     initialize_table();
   }
 
-  uint16_t crc = initial_crc;
+  auto crc = initial_crc;
+
+  while (length >= 8) {
+    crc = table[7][(crc >> 8) ^ data[0]] ^ table[6][(crc & 0xFF) ^ data[1]] ^
+          table[5][data[2]] ^ table[4][data[3]] ^ table[3][data[4]] ^
+          table[2][data[5]] ^ table[1][data[6]] ^ table[0][data[7]];
+
+    data += 8;
+    length -= 8;
+  }
 
   for (size_t i = 0; i < length; ++i) {
-    const auto byte = data[i];
-    const uint8_t index = (crc ^ byte) & 0xFF;
-
-    crc = (crc >> 8) ^ table[index];
+    crc = (crc << 8) ^ table[0][((crc >> 8) ^ data[i]) & 0xFF];
   }
 
   return crc;
@@ -175,7 +321,11 @@ public:
   [[nodiscard]] size_t remaining() const { return length - offset; }
 
   [[nodiscard]] uint8_t pop_byte() {
-    assert(length > offset);
+    if (length <= offset) {
+      valid = false;
+
+      return 0;
+    }
 
     const auto byte = data[offset++];
 
@@ -183,9 +333,15 @@ public:
   }
 
   void pop_bytes(uint8_t *dst, const size_t len) {
-    assert(remaining() >= len);
+    if (remaining() < len) {
+      valid = false;
 
-    std::copy_n(data + offset, len, dst);
+      std::memset(dst, 0, len);
+
+      return;
+    }
+
+    std::memcpy(dst, data + offset, len);
 
     offset += len;
   }
@@ -193,7 +349,11 @@ public:
   template <typename T> [[nodiscard]] T pop_number() {
     static_assert(std::is_integral_v<T> || std::is_floating_point_v<T>);
 
-    assert(remaining() >= sizeof(T));
+    if (remaining() < sizeof(T)) {
+      valid = false;
+
+      return T{};
+    }
 
     T number;
 
@@ -205,7 +365,11 @@ public:
   [[nodiscard]] bool pop_bool() { return pop_byte() != 0; }
 
   [[nodiscard]] std::string pop_string(const size_t len) {
-    assert(remaining() >= len);
+    if (remaining() < len) {
+      valid = false;
+
+      return {};
+    }
 
     std::string str(reinterpret_cast<const char *>(data + offset), len);
 
@@ -214,7 +378,10 @@ public:
     return str;
   }
 
+  [[nodiscard]] bool good() const { return valid; }
+
 private:
+  bool valid = true;
   const uint8_t *data;
   size_t offset = 0;
   size_t length;
@@ -223,7 +390,6 @@ private:
 } // namespace bytes
 
 namespace packets {
-
 // COBS max chunk size
 constexpr size_t MAX_CHUNK_ESTIMATE_SIZE = 64;
 constexpr size_t MAX_CHUNK_SIZE =
@@ -267,6 +433,8 @@ struct Packet {
 class Socket {
 public:
   static constexpr uint16_t TYPE_DEBUG_ECHO = 0xFFFF;
+
+  using buf_type = ringbuf<uint8_t, 4096>;
 
   virtual ~Socket() = default;
 
@@ -316,10 +484,58 @@ public:
     cleanup_stale_frames();
   }
 
+protected:
+  void send_chunk(const uint16_t type, const uint32_t frame_id,
+                  const uint16_t total_chunks, const uint16_t chunk_index,
+                  const uint8_t *data, const uint16_t len) {
+    assert(len <= MAX_CHUNK_SIZE);
+
+    std::vector<uint8_t> buffer;
+    const bytes::Encoder encoder(buffer);
+
+    encoder.push_number(type);
+    encoder.push_number(frame_id);
+    encoder.push_number(total_chunks);
+    encoder.push_number(chunk_index);
+    encoder.push_number(len);
+
+    encoder.push_bytes(data, len);
+
+    const auto crc = crc16_ccitt::compute(data, len);
+
+    encoder.push_number(crc);
+
+    const auto cobs_len =
+        cobs::encode(buffer.data(), buffer.size(), cobs_buffer.data());
+
+    cobs_buffer[cobs_len] = 0;
+
+    // write encoded then 0x00 as delimiter
+    queue_send_raw_data(cobs_buffer.data(), cobs_len + 1);
+  }
+
+  void send_frame(const uint16_t type, const uint32_t frame_id,
+                  const uint8_t *payload, const size_t payload_len) {
+    assert(payload_len <= MAX_FRAME_SIZE);
+
+    uint16_t total_chunks = (payload_len + MAX_CHUNK_SIZE - 1) / MAX_CHUNK_SIZE;
+
+    if (total_chunks == 0)
+      total_chunks = 1;
+
+    for (uint16_t i = 0; i < total_chunks; ++i) {
+      const size_t offset = static_cast<size_t>(i) * MAX_CHUNK_SIZE;
+      const uint16_t min = std::min(payload_len - offset, MAX_CHUNK_SIZE);
+
+      send_chunk(type, frame_id, total_chunks, i, payload + offset, min);
+    }
+  }
+
 private:
   std::vector<Frame> frame_table{};
-  std::vector<uint8_t> rx_buffer;
-  std::vector<uint8_t> tx_buffer;
+  buf_type rx_buffer{};
+  std::vector<uint8_t> contiguous_buffer{};
+  buf_type tx_buffer{};
 
   std::array<uint8_t, MAX_CHUNK_ESTIMATE_SIZE> decoded_buffer{};
   std::array<uint8_t, MAX_CHUNK_ESTIMATE_SIZE> cobs_buffer{};
@@ -331,7 +547,7 @@ private:
 
   virtual void on_available() {}
 
-  virtual void recv_raw_data(std::vector<uint8_t> &data) = 0;
+  virtual void recv_raw_data(buf_type &data) = 0;
 
   virtual size_t send_raw_data(const uint8_t *data, size_t len) = 0;
 
@@ -355,6 +571,12 @@ private:
     const auto chunk_index = decoder.pop_number<uint16_t>();
     const auto payload_size = decoder.pop_number<uint16_t>();
 
+    if (!decoder.good()) {
+      send_debug("Decoder underflow reading header");
+
+      return std::nullopt;
+    }
+
     if (payload_size != decoder.remaining() - 2) {
       send_debug("Invalid payload size");
 
@@ -368,10 +590,21 @@ private:
     }
 
     auto data = std::vector<uint8_t>(payload_size);
-
     decoder.pop_bytes(data.data(), payload_size);
 
+    if (!decoder.good()) {
+      send_debug("Decoder underflow reading payload");
+
+      return std::nullopt;
+    }
+
     const auto crc16 = decoder.pop_number<uint16_t>();
+
+    if (!decoder.good()) {
+      send_debug("Decoder underflow reading CRC");
+
+      return std::nullopt;
+    }
 
     if (!crc16_ccitt::verify(data.data(), payload_size, crc16)) {
       // CRC mismatch
@@ -450,8 +683,7 @@ private:
 
   void process_rx_buffer() {
     while (true) {
-      const size_t idx = std::find(rx_buffer.begin(), rx_buffer.end(), 0x00) -
-                         rx_buffer.begin();
+      const size_t idx = rx_buffer.find(0x00);
 
       if (idx == rx_buffer.size()) {
         // No complete chunk yet
@@ -459,9 +691,23 @@ private:
       }
 
       if (idx > 0) {
+        contiguous_buffer.resize(idx);
+
+        const auto read = rx_buffer.pop(contiguous_buffer.data(), idx);
+
+        if (read != idx) {
+          // Should not happen
+          send_debug("Ring buffer pop error");
+
+          // Remove the problematic chunk
+          rx_buffer.erase_front(idx + 1);
+
+          continue;
+        }
+
         size_t decoded_length = 0;
 
-        if (cobs::decode(rx_buffer.data(), idx, decoded_buffer.data(),
+        if (cobs::decode(contiguous_buffer.data(), idx, decoded_buffer.data(),
                          decoded_length)) {
           if (auto packet = recv(decoded_buffer.data(), decoded_length)) {
             on_recv(std::move(packet.value()));
@@ -470,23 +716,24 @@ private:
           send_debug("COBS decode error");
         }
       }
-
-      // Remove processed chunk and delimiter
-      rx_buffer.erase(rx_buffer.begin(), rx_buffer.begin() + idx + 1);
     }
   }
 
   void queue_send_raw_data(const uint8_t *data, const size_t len) {
-    tx_buffer.insert(tx_buffer.end(), data, data + len);
+    tx_buffer.push(data, len);
 
     flush_tx_buffer();
   }
 
   void flush_tx_buffer() {
-    const auto written = send_raw_data(tx_buffer.data(), tx_buffer.size());
+    contiguous_buffer.resize(tx_buffer.size());
 
-    if (written > 0) {
-      tx_buffer.erase(tx_buffer.begin(), tx_buffer.begin() + written);
+    const auto read = tx_buffer.pop(contiguous_buffer.data(), tx_buffer.size());
+    const auto written = send_raw_data(contiguous_buffer.data(), read);
+
+    if (written < read) {
+      // Push back unwritten data
+      tx_buffer.push(contiguous_buffer.data() + written, read - written);
     }
   }
 
@@ -525,52 +772,6 @@ private:
       }
     }
   }
-
-  void send_chunk(const uint16_t type, const uint32_t frame_id,
-                  const uint16_t total_chunks, const uint16_t chunk_index,
-                  const uint8_t *data, const uint16_t len) {
-    assert(len <= MAX_CHUNK_SIZE);
-
-    std::vector<uint8_t> buffer;
-    const bytes::Encoder encoder(buffer);
-
-    encoder.push_number(type);
-    encoder.push_number(frame_id);
-    encoder.push_number(total_chunks);
-    encoder.push_number(chunk_index);
-    encoder.push_number(len);
-
-    encoder.push_bytes(data, len);
-
-    const auto crc = crc16_ccitt::compute(data, len);
-
-    encoder.push_number(crc);
-
-    const auto cobs_len =
-        cobs::encode(buffer.data(), buffer.size(), cobs_buffer.data());
-
-    cobs_buffer[cobs_len] = 0;
-
-    // write encoded then 0x00 as delimiter
-    queue_send_raw_data(cobs_buffer.data(), cobs_len + 1);
-  }
-
-  void send_frame(const uint16_t type, const uint32_t frame_id,
-                  const uint8_t *payload, const size_t payload_len) {
-    assert(payload_len <= MAX_FRAME_SIZE);
-
-    uint16_t total_chunks = (payload_len + MAX_CHUNK_SIZE - 1) / MAX_CHUNK_SIZE;
-
-    if (total_chunks == 0)
-      total_chunks = 1;
-
-    for (uint16_t i = 0; i < total_chunks; ++i) {
-      const size_t offset = static_cast<size_t>(i) * MAX_CHUNK_SIZE;
-      const uint16_t min = std::min(payload_len - offset, MAX_CHUNK_SIZE);
-
-      send_chunk(type, frame_id, total_chunks, i, payload + offset, min);
-    }
-  }
 };
 
 class SerialUSBSocket : public Socket {
@@ -581,19 +782,22 @@ public:
   }
 
 private:
-  void recv_raw_data(std::vector<uint8_t> &data) override {
+  void recv_raw_data(buf_type &data) override {
+    static std::vector<uint8_t> tmp;
     tud_task();
     uint32_t avail;
 
     while ((avail = tud_cdc_available()) > 0) {
-      const size_t old = data.size();
+      tmp.resize(avail);
 
-      data.resize(old + avail);
-
-      const size_t offset = data.size();
-
-      tud_cdc_read(data.data() + offset, avail);
+      const auto read = tud_cdc_read(tmp.data(), avail);
       tud_task();
+
+      if (read > 0) {
+        data.push(tmp.data(), read);
+      } else {
+        break;
+      }
     }
   }
 
