@@ -20,5 +20,5 @@ application {
 }
 
 kotlin {
-  jvmToolchain(24)
+  jvmToolchain(21)
 }

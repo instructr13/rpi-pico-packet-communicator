@@ -1,0 +1,15 @@
+diff --git a/src/tusb.c b/src/tusb.c
+index 241c46d..3f23bac 100644
+Solution found from: https://github.com/adafruit/Adafruit_TinyUSB_Arduino/issues/293#issuecomment-1666959735
+--- a/src/tusb.c
++++ b/src/tusb.c
+@@ -179,7 +179,7 @@ bool tu_edpt_claim(tu_edpt_state_t* ep_state, osal_mutex_t mutex) {
+
+   // pre-check to help reducing mutex lock
+   TU_VERIFY((ep_state->busy == 0) && (ep_state->claimed == 0));
+-  (void) osal_mutex_lock(mutex, OSAL_TIMEOUT_WAIT_FOREVER);
++  (void) osal_mutex_lock(mutex, OSAL_TIMEOUT_NORMAL);
+
+   // can only claim the endpoint if it is not busy and not claimed yet.
+   bool const available = (ep_state->busy == 0) && (ep_state->claimed == 0);
+

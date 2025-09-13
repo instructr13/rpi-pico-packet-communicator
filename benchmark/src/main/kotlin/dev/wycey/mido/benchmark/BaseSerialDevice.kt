@@ -6,6 +6,8 @@ import dev.wycey.mido.dev.wycey.mido.benchmark.packet.Frame
 import dev.wycey.mido.dev.wycey.mido.benchmark.packet.Packet
 import dev.wycey.mido.dev.wycey.mido.benchmark.util.VariableByteBuffer
 import jssc.SerialPort
+import jssc.SerialPortEvent
+import jssc.SerialPortEventListener
 import jssc.SerialPortList
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -19,18 +21,16 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 
-internal abstract class BaseSerialDevice (
+internal abstract class BaseSerialDevice(
   val serialRate: Int,
-  private val port: String,
+  private val port: String
 ) {
   companion object {
     private const val TYPE_DEBUG_ECHO: UShort = 0xFFFFu
 
-    private const val MAX_CHUNK_SIZE: UShort = 44u // 64 - 5 (cobs) - 14 (header+crc) - 1 (delimiter)
+    private const val MAX_CHUNK_SIZE: UShort = 38u // 64 - 5 (cobs) - 14 (header+crc) - 1 (delimiter) - 6 (additional)
     private const val MAX_FRAME_SIZE = 2048
     private val RX_FRAME_TIMEOUT = Duration.ofMillis(2000)
-
-    const val VERSION: Int = 410
 
     var enableDebugOutput: Boolean = false
 
@@ -39,42 +39,30 @@ internal abstract class BaseSerialDevice (
   }
 
   private val frameTable = mutableMapOf<UInt, Frame>()
-  private val readerRunning = AtomicBoolean(false)
-  private var readerThread: Thread? = null
   private var scheduler: ScheduledExecutorService? = null
 
-  private inner class ReaderThread : Thread() {
+  private inner class ReaderThread : SerialPortEventListener {
     private val rxBuffer = VariableByteBuffer(ByteOrder.LITTLE_ENDIAN)
 
-    init {
-      name = "SerialDevice-reader-$port"
-      isDaemon = true
-    }
+    override fun serialEvent(e: SerialPortEvent) {
+      if (disposed) return
 
-    override fun run() {
-      while (readerRunning.get()) {
-        if (interrupted() || disposed) break
+      try {
+        if (!e.isRXCHAR) return
 
-        try {
-          val available = serial.inputBufferBytesCount
+        val available = e.eventValue
 
-          if (available > 0) {
-            receiveRawData(available)
+        if (available <= 0) return
 
-            if (rxBuffer.size > 0) {
-              processRXBuffer()
-            }
-          } else {
-            // No data available, sleep a bit
-            sleep(1) // 1ms sleep
-          }
-        } catch (e: InterruptedException) {
-          break
-        } catch (e: Exception) {
-          println("Error in listener thread: $e")
+        receiveRawData(available)
 
-          e.printStackTrace()
+        if (rxBuffer.size > 0) {
+          processRXBuffer()
         }
+      } catch (e: Exception) {
+        println("Error in serial listener: $e")
+
+        e.printStackTrace()
       }
     }
 
@@ -130,20 +118,22 @@ internal abstract class BaseSerialDevice (
     }
 
     override fun run() {
-      while (handlerRunning.get()) {
-        if (interrupted() || disposed) break
-
-        try {
+      try {
+        while (handlerRunning.get() && !disposed) {
           val data = packetQueue.poll(100, TimeUnit.MILLISECONDS) ?: continue
 
-          handlePacket(data)
-        } catch (e: InterruptedException) {
-          break
-        } catch (e: Exception) {
-          println("Error in handler thread: $e")
-
-          e.printStackTrace()
+          if (data.isNotEmpty()) {
+            handlePacket(data)
+          }
         }
+      } catch (_: InterruptedException) {
+        // Interrupted, exit
+      } catch (e: Exception) {
+        println("Error in handler thread: $e")
+
+        e.printStackTrace()
+      } finally {
+        handlerRunning.set(false)
       }
     }
 
@@ -185,16 +175,17 @@ internal abstract class BaseSerialDevice (
       val crc16 = packetBuffer.short.toUShort()
 
       if (!CRC16CCITT.verify(data, crc16)) {
-        debugLog("CRC16 mismatch")
+        debugLog("CRC16 mismatch, expected: $crc16, computed: ${CRC16CCITT.compute(data)}")
 
         frameTable.remove(frameId)
 
         return
       }
 
-      val frame = frameTable.getOrPut(frameId) {
-        Frame(type, frameId, totalChunks)
-      }
+      val frame =
+        frameTable.getOrPut(frameId) {
+          Frame(type, frameId, totalChunks)
+        }
 
       if (frame.chunks[chunkIndex.toInt()].isNotEmpty()) {
         debugLog("Duplicate chunk: frame $frameId, chunk $chunkIndex")
@@ -249,11 +240,12 @@ internal abstract class BaseSerialDevice (
   private val frameIdCounter = AtomicInteger()
   private val writeQueue = ConcurrentLinkedQueue<ByteArray>()
   private val writerRunning = AtomicBoolean(false)
-  private val writerExecutor = Executors.newSingleThreadExecutor() { r ->
-    Thread(r, "SerialDevice-writer-$port").apply {
-      isDaemon = true
+  private val writerExecutor =
+    Executors.newSingleThreadExecutor { r ->
+      Thread(r, "SerialDevice-writer-$port").apply {
+        isDaemon = true
+      }
     }
-  }
 
   @Volatile
   var available = false
@@ -266,6 +258,7 @@ internal abstract class BaseSerialDevice (
   init {
     try {
       serial.openPort()
+      serial.addEventListener(ReaderThread(), SerialPort.MASK_RXCHAR)
       serial.setParams(
         serialRate,
         SerialPort.DATABITS_8,
@@ -298,9 +291,9 @@ internal abstract class BaseSerialDevice (
     if (!available) return
 
     sendFrame(
-        packet.type,
-        frameIdCounter.getAndUpdate { if (it == UInt.MAX_VALUE.toInt()) 0 else it + 1 }.toUInt(),
-        packet.payload
+      packet.type,
+      frameIdCounter.getAndUpdate { if (it == UInt.MAX_VALUE.toInt()) 0 else it + 1 }.toUInt(),
+      packet.payload
     )
   }
 
@@ -312,10 +305,9 @@ internal abstract class BaseSerialDevice (
     if (available) return
 
     serial.setDTR(true)
-    startReaders()
+    startHandler()
 
     scheduler = Executors.newSingleThreadScheduledExecutor()
-
     scheduler!!.scheduleAtFixedRate(::cleanupStaleFrames, 1, 1, TimeUnit.SECONDS)
 
     available = true
@@ -323,41 +315,42 @@ internal abstract class BaseSerialDevice (
     debugLog("Started communication")
   }
 
-  fun stop() {
+  open fun stop() {
     if (disposed) {
       throw IllegalStateException("Device is disposed")
     }
 
     if (!available) return
 
-    stopReaders()
-    serial.setDTR(false)
-
+    stopHandler()
     stopWriter()
-
-    available = false
 
     scheduler?.shutdownNow()
     scheduler = null
+
+    if (serial.isOpened) {
+      serial.removeEventListener()
+      serial.setDTR(false)
+    }
+
+    available = false
 
     debugLog("Stopped communication")
   }
 
-  fun dispose() {
+  open fun dispose() {
     if (disposed) return
 
+    stop()
+
     disposed = true
-    available = false
 
-    serial.setDTR(false)
-    stopReaders()
-
-    stopWriter()
-
-    scheduler?.shutdownNow()
-    scheduler = null
-
-    serial.closePort()
+    try {
+      if (serial.isOpened) {
+        serial.closePort()
+      }
+    } catch (_: Exception) {
+    }
 
     debugLog("Disposed")
   }
@@ -378,23 +371,17 @@ internal abstract class BaseSerialDevice (
     }
   }
 
-  private fun startReaders() {
-    if (readerRunning.compareAndSet(false, true)) {
-      readerThread = ReaderThread().apply { start() }
-    }
-
+  private fun startHandler() {
     if (handlerRunning.compareAndSet(false, true)) {
       handlerThread = HandlerThread().apply { start() }
     }
   }
 
-  private fun stopReaders() {
-    readerRunning.set(false)
-    readerThread?.interrupt()
-    readerThread = null
-
+  private fun stopHandler() {
     handlerRunning.set(false)
+    packetQueue.offer(ByteArray(0)) // dummy poll
     handlerThread?.interrupt()
+    handlerThread?.join(500)
     handlerThread = null
   }
 
@@ -434,7 +421,7 @@ internal abstract class BaseSerialDevice (
 
   private fun stopWriter() {
     writerExecutor.shutdownNow()
-
+    writerExecutor.awaitTermination(500, TimeUnit.MILLISECONDS)
     writerRunning.set(false)
 
     writeQueue.clear()
@@ -447,8 +434,10 @@ internal abstract class BaseSerialDevice (
     chunkIndex: UShort,
     data: ByteArray
   ) {
-    val buffer = ByteBuffer.allocate(2 + 4 + 2 + 2 + 2 + data.size + 2)
-      .order(ByteOrder.LITTLE_ENDIAN)
+    val buffer =
+      ByteBuffer
+        .allocate(2 + 4 + 2 + 2 + 2 + data.size + 2)
+        .order(ByteOrder.LITTLE_ENDIAN)
 
     buffer.putShort(type.toShort())
     buffer.putInt(frameId.toInt())
@@ -470,7 +459,11 @@ internal abstract class BaseSerialDevice (
     startWriter()
   }
 
-  private fun sendFrame(type: UShort, frameId: UInt, data: ByteArray) {
+  private fun sendFrame(
+    type: UShort,
+    frameId: UInt,
+    data: ByteArray
+  ) {
     if (data.size > MAX_FRAME_SIZE) {
       throw IllegalArgumentException("Frame size too large: ${data.size}")
     }

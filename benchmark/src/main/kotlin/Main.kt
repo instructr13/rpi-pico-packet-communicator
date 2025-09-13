@@ -76,5 +76,5 @@ fun main(vararg args: String) {
 
   BaseSerialDevice.enableDebugOutput = true
 
-  benchmark(args[0], 200, 1024)
+  benchmark(args[0], 2000, 1024)
 }
