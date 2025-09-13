@@ -5,7 +5,7 @@
 #include <string>
 #include <vector>
 
-namespace bytes {
+namespace pcomm::bytes {
 
 // Little-endian encoder
 class Encoder {

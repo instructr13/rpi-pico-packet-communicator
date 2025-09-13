@@ -1,6 +1,6 @@
 #include "cobs.h"
 
-size_t cobs::encode(const uint8_t *input, const size_t length,
+size_t pcomm::cobs::encode(const uint8_t *input, const size_t length,
                     uint8_t *output) {
   if (length == 0) {
     output[0] = 1;
@@ -42,7 +42,7 @@ size_t cobs::encode(const uint8_t *input, const size_t length,
   return dst - output;
 }
 
-bool cobs::decode(const uint8_t *input, const size_t length, uint8_t *output,
+bool pcomm::cobs::decode(const uint8_t *input, const size_t length, uint8_t *output,
                   size_t &output_length) {
   if (length == 0) {
     output_length = 0;

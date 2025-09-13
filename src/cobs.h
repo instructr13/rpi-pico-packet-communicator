@@ -3,7 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 
-namespace cobs {
+namespace pcomm::cobs {
 
 size_t encode(const uint8_t *input, size_t length, uint8_t *output);
 

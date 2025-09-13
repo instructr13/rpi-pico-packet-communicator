@@ -7,16 +7,14 @@ namespace {
 std::array<std::array<uint16_t, 256>, 8> table;
 bool table_initialized = false;
 
-} // namespace
-
-uint16_t crc16_ccitt::basic_crc16(uint16_t crc, const uint8_t *data,
+uint16_t basic_crc16(uint16_t crc, const uint8_t *data,
                                   const size_t length) {
   for (size_t i = 0; i < length; ++i) {
     crc ^= static_cast<uint16_t>(data[i]) << 8;
 
     for (uint8_t j = 0; j < 8; ++j) {
       if (crc & 0x8000) {
-        crc = (crc << 1) ^ POLYNOMIAL;
+        crc = (crc << 1) ^ pcomm::crc16_ccitt::POLYNOMIAL;
       } else {
         crc <<= 1;
       }
@@ -26,7 +24,7 @@ uint16_t crc16_ccitt::basic_crc16(uint16_t crc, const uint8_t *data,
   return crc;
 }
 
-void crc16_ccitt::initialize_table() {
+void init_table() {
   for (size_t n = 0; n < 256; ++n) {
     const auto byte = static_cast<uint8_t>(n);
 
@@ -46,10 +44,12 @@ void crc16_ccitt::initialize_table() {
   table_initialized = true;
 }
 
-uint16_t crc16_ccitt::compute(const uint8_t *data, size_t length,
+} // namespace
+
+uint16_t pcomm::crc16_ccitt::compute(const uint8_t *data, size_t length,
                               const uint16_t initial_crc) {
   if (!table_initialized) {
-    crc16_ccitt::initialize_table();
+    init_table();
   }
 
   auto crc = initial_crc;

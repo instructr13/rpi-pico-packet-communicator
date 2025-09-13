@@ -4,13 +4,9 @@
 #include <cstring>
 
 // CRC16-CCITT Implementation
-namespace crc16_ccitt {
+namespace pcomm::crc16_ccitt {
 
 constexpr uint16_t POLYNOMIAL = 0x1021;
-
-uint16_t basic_crc16(uint16_t crc, const uint8_t *data, size_t length);
-
-void initialize_table();
 
 uint16_t compute(const uint8_t *data, size_t length, uint16_t initial_crc = 0);
 

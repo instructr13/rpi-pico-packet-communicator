@@ -1,11 +1,11 @@
-#include "packets.h"
+#include "pcomm/socket.h"
 
 #include <algorithm>
 
 #include "cobs.h"
 #include "crc16_ccitt.h"
 
-using namespace packets;
+using namespace pcomm::socket;
 
 void Socket::update() {
   if (!is_available()) {
@@ -45,10 +45,10 @@ void Socket::update() {
 void Socket::send_chunk(const uint16_t type, const uint32_t frame_id,
                         const uint16_t total_chunks, const uint16_t chunk_index,
                         const uint8_t *data, const uint16_t len) {
-  assert(len <= MAX_CHUNK_SIZE);
+  assert(len <= packets::MAX_CHUNK_SIZE);
 
   chunk_temp_buffer.clear();
-  chunk_temp_buffer.reserve(MAX_CHUNK_ESTIMATE_SIZE);
+  chunk_temp_buffer.reserve(packets::MAX_CHUNK_ESTIMATE_SIZE);
 
   const bytes::Encoder encoder(chunk_temp_buffer);
 
@@ -72,27 +72,27 @@ void Socket::send_chunk(const uint16_t type, const uint32_t frame_id,
 
 void Socket::send_frame(const uint16_t type, const uint32_t frame_id,
                         const uint8_t *payload, const size_t payload_len) {
-  assert(payload_len <= MAX_FRAME_SIZE);
+  assert(payload_len <= packets::MAX_FRAME_SIZE);
 
   if (tx_buffer.full()) {
     // No space
     return;
   }
 
-  uint16_t total_chunks = (payload_len + MAX_CHUNK_SIZE - 1) / MAX_CHUNK_SIZE;
+  uint16_t total_chunks = (payload_len + packets::MAX_CHUNK_SIZE - 1) / packets::MAX_CHUNK_SIZE;
 
   if (total_chunks == 0)
     total_chunks = 1;
 
   for (uint16_t i = 0; i < total_chunks; ++i) {
-    const size_t offset = static_cast<size_t>(i) * MAX_CHUNK_SIZE;
-    const uint16_t min = std::min(payload_len - offset, MAX_CHUNK_SIZE);
+    const size_t offset = static_cast<size_t>(i) * packets::MAX_CHUNK_SIZE;
+    const uint16_t min = std::min(payload_len - offset, packets::MAX_CHUNK_SIZE);
 
     send_chunk(type, frame_id, total_chunks, i, payload + offset, min);
   }
 }
 
-std::optional<Packet> Socket::recv(const uint8_t *buffer, const size_t length) {
+std::optional<pcomm::packets::Packet> Socket::recv(const uint8_t *buffer, const size_t length) {
   if (length < 12) {
     send_debug("Packet too short");
 
@@ -122,7 +122,7 @@ std::optional<Packet> Socket::recv(const uint8_t *buffer, const size_t length) {
     return std::nullopt;
   }
 
-  if (payload_size > MAX_CHUNK_SIZE) {
+  if (payload_size > packets::MAX_CHUNK_SIZE) {
     send_debug("Payload size too large");
 
     return std::nullopt;
@@ -184,7 +184,7 @@ std::optional<Packet> Socket::recv(const uint8_t *buffer, const size_t length) {
   if (frame->received_chunks == frame->total_chunks) {
     std::vector<uint8_t> full_payload;
 
-    full_payload.reserve(frame->total_chunks * MAX_CHUNK_SIZE);
+    full_payload.reserve(frame->total_chunks * packets::MAX_CHUNK_SIZE);
 
     for (auto &chunk : frame->chunks) {
       full_payload.insert(full_payload.end(),
@@ -194,7 +194,7 @@ std::optional<Packet> Socket::recv(const uint8_t *buffer, const size_t length) {
       chunk.clear();
     }
 
-    if (full_payload.size() > MAX_FRAME_SIZE) {
+    if (full_payload.size() > packets::MAX_FRAME_SIZE) {
       send_debug("Frame size overflow");
 
       // Overflow, mark frame as invalid
@@ -203,7 +203,7 @@ std::optional<Packet> Socket::recv(const uint8_t *buffer, const size_t length) {
       return std::nullopt;
     }
 
-    auto packet = Packet(frame->type, std::move(full_payload));
+    auto packet = packets::Packet(frame->type, std::move(full_payload));
 
     // Remove frame from table
     frame_table.erase(frame_id);
@@ -254,7 +254,7 @@ void Socket::process_rx_buffer() {
   }
 }
 
-Frame *Socket::get_or_create_frame(const uint16_t type, uint32_t frame_id,
+pcomm::packets::Frame *Socket::get_or_create_frame(const uint16_t type, uint32_t frame_id,
                                    const uint16_t total_chunks) {
   const auto frame = frame_table.find(frame_id);
 
@@ -269,7 +269,7 @@ Frame *Socket::get_or_create_frame(const uint16_t type, uint32_t frame_id,
     return &frame->second;
   }
 
-  frame_table.emplace(frame_id, Frame(type, frame_id, total_chunks));
+  frame_table.emplace(frame_id, packets::Frame(type, frame_id, total_chunks));
 
   return &frame_table.at(frame_id);
 }
@@ -279,7 +279,7 @@ void Socket::cleanup_stale_frames() {
 
   for (auto it = frame_table.begin(); it != frame_table.end();) {
     if (it->second.invalid ||
-        now - it->second.last_update_ms > RX_FRAME_TIMEOUT_MS) {
+        now - it->second.last_update_ms > packets::RX_FRAME_TIMEOUT_MS) {
       send_debug("Cleaning up stale/invalid frame id: " +
                  std::to_string(it->second.frame_id));
 

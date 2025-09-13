@@ -3,6 +3,8 @@
 #include <array>
 #include <optional>
 
+namespace pcomm {
+
 // Fixed-size ringbuf
 template <typename T, size_t N> class ringbuf {
   static_assert(N > 0 && (N & (N - 1)) == 0,
@@ -137,3 +139,5 @@ private:
   size_t read_idx = 0;
   size_t write_idx = 0;
 };
+
+} // namespace pcomm

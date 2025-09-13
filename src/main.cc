@@ -1,14 +1,14 @@
-#include "packets/SerialUSBSocket.h"
+#include "pcomm/pcomm.h"
 
 #include <Adafruit_TinyUSB.h>
 #include <Arduino.h>
 
 void wait_for_serial();
 
-class MySocket final : public packets::SerialUSBSocket {
+class MySocket final : public pcomm::socket::SerialUSBSocket {
   void on_unavailable() override { wait_for_serial(); }
 
-  void on_recv(const packets::Packet packet) override {
+  void on_recv(const pcomm::packets::Packet packet) override {
     // Echo back the received packet
     send(packet);
   }

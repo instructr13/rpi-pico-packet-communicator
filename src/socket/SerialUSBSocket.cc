@@ -1,6 +1,6 @@
-#include "SerialUSBSocket.h"
+#include "pcomm/socket.h"
 
-using namespace packets;
+using namespace pcomm::socket;
 
 void SerialUSBSocket::yield() { tud_task(); }
 

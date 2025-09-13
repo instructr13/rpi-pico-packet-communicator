@@ -4,7 +4,7 @@
 
 #include "packets.h"
 
-namespace packets {
+namespace pcomm::socket {
 
 class SerialUSBSocket : public Socket {
 public:
