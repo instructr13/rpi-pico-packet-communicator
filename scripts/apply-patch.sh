@@ -26,11 +26,11 @@ apply_patch() {
 
   echo -n "Applying $(basename "$patch_file") to $root_path..."
 
-  if patch -d "$root_path" -p1 --dry-run < "$patch_file" > /dev/null 2>&1; then
-    patch -d "$root_path" -p1 < "$patch_file"
+  if git -C "$root_path" apply --check "$patch_file" &>/dev/null; then
+    git -C "$root_path" apply "$patch_file"
     echo " done."
   else
-    echo " already applied or failed."
+    echo " already applied or cannot be applied."
   fi
 }
 
