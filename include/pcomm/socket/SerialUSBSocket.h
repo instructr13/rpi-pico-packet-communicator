@@ -2,7 +2,7 @@
 
 #include <Adafruit_TinyUSB.h>
 
-#include "packets.h"
+#include "../packets.h"
 
 namespace pcomm::socket {
 
